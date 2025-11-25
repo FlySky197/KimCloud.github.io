@@ -1,0 +1,284 @@
+// Full-stack Node.js + Express sign-in system (black/red theme)
+// Project layout included below as separate files. Save each file to recreate the app.
+
+// -----------------------------
+// FILE: package.json
+// -----------------------------
+{
+  "name": "cloud-signin",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^8.5.0",
+    "bcrypt": "^5.1.0",
+    "connect-sqlite3": "^0.9.0",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "helmet": "^6.0.1",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5"
+  }
+}
+
+
+// -----------------------------
+// FILE: .env (create locally, DO NOT commit to public repos)
+// -----------------------------
+// SESSION_SECRET=super-long-random-string
+// ADMIN_USERNAME=yourusername
+// ADMIN_PASSWORD=yourpassword
+// PORT=3000
+
+
+// -----------------------------
+// FILE: server.js
+// -----------------------------
+const path = require('path');
+const express = require('express');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
+const bcrypt = require('bcrypt');
+const Database = require('better-sqlite3');
+const fs = require('fs');
+require('dotenv').config();
+
+const app = express();
+const dbFile = path.join(__dirname, 'data.db');
+const db = new Database(dbFile);
+
+// create users table if not exists
+db.prepare(`CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL
+)`).run();
+
+// create uploads folder
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+
+app.use(helmet());
+app.use(morgan('dev'));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.use(session({
+  store: new SQLiteStore({ db: 'sessions.sqlite' }),
+  secret: process.env.SESSION_SECRET || 'change_this_secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 1000 * 60 * 60 * 24 } // 1 day
+}));
+
+// helper: create admin user from env if it doesn't exist
+async function ensureAdmin() {
+  const adminUser = process.env.ADMIN_USERNAME;
+  const adminPass = process.env.ADMIN_PASSWORD;
+  if (!adminUser || !adminPass) {
+    console.warn('No ADMIN_USERNAME/ADMIN_PASSWORD set in .env — create a user manually.');
+    return;
+  }
+  const row = db.prepare('SELECT id FROM users WHERE username = ?').get(adminUser);
+  if (!row) {
+    const hash = await bcrypt.hash(adminPass, 12);
+    db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(adminUser, hash);
+    console.log(`Admin user created: ${adminUser}`);
+  } else {
+    console.log('Admin user already exists.');
+  }
+}
+
+ensureAdmin().catch(console.error);
+
+// Auth middleware
+function requireAuth(req, res, next) {
+  if (req.session && req.session.userId) return next();
+  return res.redirect('/');
+}
+
+// Routes
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ ok: false, message: 'Missing creds' });
+
+  const row = db.prepare('SELECT id, password_hash FROM users WHERE username = ?').get(username);
+  if (!row) return res.status(401).json({ ok: false, message: 'Invalid username or password' });
+
+  const match = await bcrypt.compare(password, row.password_hash);
+  if (!match) return res.status(401).json({ ok: false, message: 'Invalid username or password' });
+
+  // login success
+  req.session.userId = row.id;
+  req.session.username = username;
+  return res.json({ ok: true });
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy(err => {
+    if (err) return res.status(500).json({ ok: false });
+    res.clearCookie('connect.sid');
+    return res.json({ ok: true });
+  });
+});
+
+app.get('/dashboard', requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// placeholder for future uploads endpoint (we'll add later when you want the cloud uploads)
+const multer = require('multer');
+const storage = multer.diskStorage({
+  destination: uploadsDir,
+  filename: (req, file, cb) => {
+    const safeName = Date.now() + '-' + file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    cb(null, safeName);
+  }
+});
+const upload = multer({ storage });
+
+app.post('/upload', requireAuth, upload.array('photos', 50), (req, res) => {
+  // for now just confirm upload; later we'll add DB records and cloud storage
+  return res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
+});
+
+// start
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server running on http://localhost:${port}`);
+});
+
+
+// -----------------------------
+// FILE: public/index.html (login page)
+// -----------------------------
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Sign in — Cloud</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="bg-black">
+  <main class="center">
+    <div class="card">
+      <h1 class="logo">Cloud</h1>
+      <form id="loginForm">
+        <label>Username
+          <input id="username" name="username" autocomplete="username" required />
+        </label>
+        <label>Password
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button class="btn" type="submit">Sign in</button>
+        <p id="msg" class="msg"></p>
+      </form>
+    </div>
+    <footer class="footer">Made for you • black & red</footer>
+  </main>
+  <script src="/login.js"></script>
+</body>
+</html>
+
+
+// -----------------------------
+// FILE: public/dashboard.html
+// -----------------------------
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dashboard — Cloud</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="bg-black">
+  <header class="top">
+    <h1 class="logo">Cloud</h1>
+    <form id="logoutForm"><button class="btn small">Sign out</button></form>
+  </header>
+  <main class="center">
+    <div class="card">
+      <h2>Welcome</h2>
+      <p>Upload photos later. For now sign-in works.</p>
+    </div>
+  </main>
+  <script>
+    document.getElementById('logoutForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await fetch('/logout', { method: 'POST' });
+      window.location = '/';
+    });
+  </script>
+</body>
+</html>
+
+
+// -----------------------------
+// FILE: public/style.css
+// -----------------------------
+:root{
+  --bg:#000;
+  --card:#111;
+  --accent:#ff2b2b;
+  --text:#e9e9e9;
+}
+*{box-sizing:border-box;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+body.bg-black{background:linear-gradient(180deg,#000,#0b0b0b);color:var(--text);min-height:100vh;margin:0}
+.center{display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:calc(100vh - 80px)}
+.card{background:var(--card);padding:28px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.7);width:360px;max-width:94vw}
+.logo{font-size:28px;color:var(--accent);margin:0 0 12px}
+label{display:block;font-size:13px;margin:8px 0;color:#bbb}
+input{width:100%;padding:10px;border-radius:8px;border:1px solid #222;background:#0c0c0c;color:var(--text)}
+.btn{margin-top:12px;background:var(--accent);border:0;padding:10px 12px;border-radius:8px;color:#111;font-weight:700;cursor:pointer}
+.btn.small{padding:6px 10px;font-size:13px;border-radius:8px}
+.msg{color:#f88;margin-top:8px;font-size:13px}
+.top{display:flex;justify-content:space-between;align-items:center;padding:14px 22px}
+.footer{color:#666;margin-top:18px}
+
+
+// -----------------------------
+// FILE: public/login.js
+// -----------------------------
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const u = document.getElementById('username').value.trim();
+  const p = document.getElementById('password').value;
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  const res = await fetch('/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: u, password: p })
+  });
+  const j = await res.json().catch(()=>({ok:false}));
+  if (j.ok) {
+    window.location = '/dashboard';
+  } else {
+    msg.textContent = j.message || 'Login failed';
+  }
+});
+
+
+// -----------------------------
+// Quick setup notes (local):
+// 1) npm install
+// 2) create a .env with SESSION_SECRET, ADMIN_USERNAME, ADMIN_PASSWORD
+// 3) npm start
+// 4) open http://localhost:3000
+// -----------------------------
+
+// This is the initial real sign-in system. Next steps I can add on request:
+// - Register UI or user management
+// - Email/password reset
+// - Photo upload flow, DB records, and delete-from-device helpers
+// - Storage backend (S3, Google Cloud Storage, etc.)
+
